@@ -12,7 +12,9 @@ export interface UvCoordinate {
   v: number;
 }
 
-export type ToolMode = "orbit" | "brush";
+export type ToolMode = "orbit" | "brush" | "capture" | "decal";
+
+export type CaptureTransformMode = "translate" | "rotate" | "scale";
 
 export type MaterialChannel = "baseColor" | "normal" | "roughness" | "metallic";
 
@@ -24,7 +26,33 @@ export interface PbrMaterialSettings {
   normalScale: number;
 }
 
-/** Simple studio lighting; environment here means hemispherical fill, not IBL. */
+/** Deterministic local Base Color effect used before any AI integration. */
+export interface ColorAdjustmentSettings {
+  hueDegrees: number;
+  saturation: number;
+  brightness: number;
+  contrast: number;
+  strength: number;
+}
+
+export interface ChannelAssetSummary {
+  channel: MaterialChannel;
+  fileName: string | null;
+  width: number;
+  height: number;
+  colorSpace: "srgb" | "linear";
+  isLoaded: boolean;
+  isModified: boolean;
+}
+
+/** UI-safe view of one material and its four editable texture channels. */
+export interface TextureSetSummary {
+  textureSetId: string;
+  materialName: string;
+  channels: Record<MaterialChannel, ChannelAssetSummary>;
+}
+
+/** Built-in studio IBL/fill plus an adjustable directional key light. */
 export interface LightingSettings {
   environmentColor: string;
   environmentIntensity: number;
@@ -65,4 +93,62 @@ export interface MaskSummary {
   height: number;
   previewDataUrl: string;
   hasContent: boolean;
+}
+
+/** Serializable settings for the orthographic projection-capture volume. */
+export interface ProjectionCaptureSettings {
+  near: number;
+  far: number;
+  resolution: number;
+}
+
+/**
+ * UI-safe snapshot of the active capture actor and its latest GPU captures.
+ *
+ * Unlit material channels and selection coverage stay separate so a future
+ * image-model provider never receives baked lighting, highlights, or shadows.
+ */
+export interface ProjectionCaptureSummary extends ProjectionCaptureSettings {
+  width: number;
+  height: number;
+  baseColorPreviewDataUrl: string;
+  roughnessPreviewDataUrl: string;
+  materialNormalPreviewDataUrl: string;
+  metallicPreviewDataUrl: string;
+  maskPreviewDataUrl: string;
+  viewNormalPreviewDataUrl: string;
+  linearDepthPreviewDataUrl: string;
+  compositePreviewDataUrl: string;
+}
+
+export type DecalImageOrigin = "capture" | "file" | "generated";
+
+/** Provider-neutral image payload accepted by the Decal runtime. */
+export interface DecalImageInput {
+  blob: Blob;
+  label: string;
+  origin: DecalImageOrigin;
+}
+
+export interface DecalActorSettings {
+  useCaptureMask: boolean;
+}
+
+/** UI-safe snapshot; mutable Three.js resources remain inside ThreeViewport. */
+export interface DecalActorSummary extends DecalActorSettings {
+  textureSetId: string;
+  sourceLabel: string;
+  sourceOrigin: DecalImageOrigin;
+  width: number;
+  height: number;
+  near: number;
+  far: number;
+  previewDataUrl: string;
+}
+
+export interface DecalBakeResult {
+  textureSetId: string;
+  width: number;
+  height: number;
+  processedPixels: number;
 }

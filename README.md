@@ -4,7 +4,7 @@ An AI-assisted 3D texture editing desktop client for technical-art workflows.
 
 Super Tex Kid is being developed as a portfolio project that explores model-aware texture editing: selecting pixels by painting directly on a 3D surface, isolating material texture sets, previewing PBR channels in real time, and eventually applying local or AI-assisted edits non-destructively.
 
-> Current status: functional prototype. The 3D viewport, material-aware surface brush, selection-mask preview, BVH raycast acceleration, PBR texture import, and lighting controls are working. Texture processing, project persistence, undo/redo, and AI execution are planned but not implemented yet.
+> Current status: functional prototype. The viewport, material-aware brush, BVH picking, PBR import, multi-pass projection capture, transformable PBR Decal preview, and non-destructive Base Color bake/export are implemented. The editor now includes a compact DCC-style inspector and Maya-style Actor transform shortcuts. Project persistence, undo/redo, multi-Decal layers, and AI execution are not connected yet.
 
 ## Target experience
 
@@ -25,7 +25,8 @@ The long-term goal is not to replace a full material-authoring suite. It is to p
 ### Desktop application and editor shell
 
 - Tauri 2 desktop application with a React and TypeScript frontend.
-- Resizable Three.js viewport and scrollable inspector UI.
+- Resizable Three.js viewport and six independently collapsible workflow panels.
+- Compact English DCC-style interface with a charcoal palette and restrained dark-blue accents.
 - Drag-and-drop and file-picker import for standalone `.glb` files.
 - Zustand-based editor state shared between the viewport and property panels.
 
@@ -54,6 +55,26 @@ The long-term goal is not to replace a full material-authoring suite. It is to p
 - Base Color tint, roughness, metallic, and normal-strength controls.
 - Adjustable hemispherical fill light and directional light, including color, intensity, azimuth, and elevation.
 
+### Local non-destructive Base Color editing
+
+- Per-material Texture Set runtime with Base Color, Roughness, Normal, and Metallic channel metadata.
+- Immutable Base Color source texture plus a separate working preview texture.
+- Selection-masked hue, saturation, brightness, contrast, and effect-strength controls.
+- Frame-coalesced preview rendering capped at 1024 pixels on the longest edge.
+- Reset to the exact source map and full-source-resolution PNG export.
+- Deterministic CPU/Canvas processing with no ComfyUI dependency.
+
+### Projection capture and Decal bake
+
+- Orthographic Capture Actor seeded from the painted selection bounds and average surface normal.
+- Separate unlit Base Color, Roughness, material Normal, Metallic, selection-mask, view-space geometry Normal, and linear-depth previews.
+- One transformable Decal Actor initialized from the latest Capture, with file-imported RGBA replacement and an optional Capture Mask constraint.
+- Maya-style `W`, `E`, and `R` shortcuts for Actor translation, rotation, and scale, plus independent Capture Actor, Decal Actor, and Decal Preview visibility.
+- Projective Base Color preview injected into the target `MeshStandardMaterial`, preserving PBR lighting, normal, roughness, metallic, IBL, and tone mapping.
+- Preview and bake remain isolated to the captured material slot, with depth occlusion and a fixed grazing-angle fade.
+- GPU UV-space Base Color bake at the imported source resolution, followed by one readback into a resettable Working Texture.
+- Provider-neutral Blob input shared by local files and a future generated-image result; no image API is connected yet.
+
 ## Development strategy
 
 The project is built in vertical slices. Each milestone must produce a usable artist-facing interaction before more complex AI or image-processing systems are added.
@@ -73,19 +94,20 @@ See [docs/architecture.md](docs/architecture.md) for the current directory and r
 
 ## Roadmap
 
-### Next milestone: non-destructive texture editing
+### Next milestone: Decal validation and editing workflow
 
-- Introduce explicit Project, Texture Set, Channel Asset, and Effect Stack data models.
-- Preserve original textures separately from working textures.
+- Validate projection orientation, depth occlusion, multi-material isolation, and UV-island bake behavior on representative GLB assets.
+- Add bake-loss diagnostics for grazing angles, overlapping UVs, and insufficient texel density.
+- Promote the runtime Texture Set into serializable Project, Channel Asset, and Effect Stack models.
 - Add a 2D texture/UV inspection view.
-- Apply Base Color hue, saturation, brightness, and contrast adjustments through the selection mask.
-- Add feathered mask blending, before/after comparison, reset, and PNG export.
+- Add explicit feather controls and before/after comparison.
 - Add undo/redo for strokes and effect parameters.
+- Save and reload project manifests with portable asset references.
 
 ### Later milestones
 
-- GPU UV-space brush projection and render-target image processing.
-- HDRI/image-based lighting for more representative metallic reflections.
+- GPU UV-space brush projection and multi-Decal layer compositing.
+- User-imported HDRI lighting and environment rotation controls.
 - Project save/load and portable asset references.
 - OBJ and FBX import with explicit material/texture dependency handling.
 - AI job abstraction for inpainting, cleanup, variation, and channel-aware texture generation.
@@ -95,12 +117,14 @@ See [docs/architecture.md](docs/architecture.md) for the current directory and r
 ## Current limitations
 
 - Only self-contained `.glb` model import is supported.
-- Imported texture maps live in memory and are not saved as a project yet.
+- Imported texture maps and local effect settings live in memory and are not saved as a project yet.
 - Normal maps currently expect the OpenGL `+Y` convention.
-- The environment control is hemispherical fill lighting, not HDRI/IBL.
+- Studio IBL is built in; importing or rotating a custom HDRI is not supported yet.
 - Existing masks are not automatically resampled when a different-resolution texture is imported after painting.
 - High-resolution source masks are committed at stroke end; exceptionally long strokes may still cause a short pointer-up pause.
 - The AI processing layer is not connected yet.
+- Decal bake currently targets Base Color only, supports one active static-mesh Decal, and requires an existing Base Color map with UV0.
+- Skinned meshes, position morphs, UDIMs, overlapping-UV diagnostics, and PBR Decal channel blending are outside the current bake path.
 
 ## Technology stack
 

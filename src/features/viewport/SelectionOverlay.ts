@@ -5,6 +5,7 @@ interface OverlayUniforms {
   selectionMap: THREE.IUniform<THREE.Texture>;
   innerOffset: THREE.IUniform<THREE.Vector2>;
   outerOffset: THREE.IUniform<THREE.Vector2>;
+  opacity: THREE.IUniform<number>;
 }
 
 /**
@@ -18,6 +19,7 @@ export class SelectionOverlay {
   private readonly originalDefines: Record<string, unknown> | undefined;
   private shaderUniforms: OverlayUniforms | null = null;
   private settings: BrushSettings;
+  private enabled = true;
 
   constructor(
     private readonly material: THREE.MeshStandardMaterial,
@@ -42,18 +44,21 @@ export class SelectionOverlay {
         selectionMap: { value: this.selectionMap },
         innerOffset: { value: this.offsetFor(this.settings.innerReferencePx) },
         outerOffset: { value: this.offsetFor(this.settings.outerReferencePx) },
+        opacity: { value: this.enabled ? 1 : 0 },
       };
       this.shaderUniforms = uniforms;
       shader.uniforms.uStkSelectionMap = uniforms.selectionMap;
       shader.uniforms.uStkInnerOffset = uniforms.innerOffset;
       shader.uniforms.uStkOuterOffset = uniforms.outerOffset;
+      shader.uniforms.uStkOverlayOpacity = uniforms.opacity;
 
       shader.fragmentShader = shader.fragmentShader.replace(
         "#include <uv_pars_fragment>",
         `#include <uv_pars_fragment>
 uniform sampler2D uStkSelectionMap;
 uniform vec2 uStkInnerOffset;
-uniform vec2 uStkOuterOffset;`,
+uniform vec2 uStkOuterOffset;
+uniform float uStkOverlayOpacity;`,
       );
 
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -78,9 +83,9 @@ vec3 stkRedMultiply = outgoingLight * vec3( 1.0, 0.18, 0.18 );
 vec3 stkRedVisible = mix( stkRedMultiply, vec3( 0.62, 0.035, 0.03 ), 0.22 );
 vec3 stkGrayMultiply = outgoingLight * vec3( 0.38 );
 
-outgoingLight = mix( outgoingLight, stkRedVisible, stkCenter * 0.72 );
-outgoingLight = mix( outgoingLight, stkRedMultiply, stkSelectionEdge * 0.38 );
-outgoingLight = mix( outgoingLight, stkGrayMultiply, stkOuterRing * 0.7 );
+outgoingLight = mix( outgoingLight, stkRedVisible, stkCenter * 0.72 * uStkOverlayOpacity );
+outgoingLight = mix( outgoingLight, stkRedMultiply, stkSelectionEdge * 0.38 * uStkOverlayOpacity );
+outgoingLight = mix( outgoingLight, stkGrayMultiply, stkOuterRing * 0.7 * uStkOverlayOpacity );
 
 #include <opaque_fragment>`,
       );
@@ -93,6 +98,12 @@ outgoingLight = mix( outgoingLight, stkGrayMultiply, stkOuterRing * 0.7 );
     if (!this.shaderUniforms) return;
     this.shaderUniforms.innerOffset.value.copy(this.offsetFor(settings.innerReferencePx));
     this.shaderUniforms.outerOffset.value.copy(this.offsetFor(settings.outerReferencePx));
+  }
+
+  /** Temporarily hides editor colors while projection capture renders RGB. */
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    if (this.shaderUniforms) this.shaderUniforms.opacity.value = enabled ? 1 : 0;
   }
 
   dispose(): void {
