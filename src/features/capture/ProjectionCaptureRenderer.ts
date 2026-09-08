@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { MaterialChannel } from "../../types/editor";
 import type { SelectionMask } from "../mask/SelectionMask";
 import { ProjectionCaptureActor } from "./ProjectionCaptureActor";
 
@@ -15,7 +16,7 @@ export interface ProjectionCaptureImages {
 
 export interface ProjectionCaptureRuntime {
   images: ProjectionCaptureImages;
-  baseColorCanvas: HTMLCanvasElement;
+  channelCanvases: Record<MaterialChannel, HTMLCanvasElement>;
   maskCanvas: HTMLCanvasElement;
 }
 
@@ -54,7 +55,6 @@ export class ProjectionCaptureRenderer {
         channelMap: { value: null },
         uvTransform: { value: new THREE.Matrix3() },
         fallbackColor: { value: new THREE.Color(0xffffff) },
-        scalar: { value: 1 },
         hasMap: { value: 0 },
         channelMode: { value: 0 },
       },
@@ -68,7 +68,6 @@ void main() {
 uniform sampler2D channelMap;
 uniform mat3 uvTransform;
 uniform vec3 fallbackColor;
-uniform float scalar;
 uniform float hasMap;
 uniform int channelMode;
 varying vec2 vCaptureUv;
@@ -77,13 +76,15 @@ void main() {
   vec4 texel = hasMap > 0.5 ? texture2D( channelMap, transformedUv ) : vec4( 1.0 );
   vec3 result;
   if ( channelMode == 0 ) {
-    result = texel.rgb * fallbackColor;
+    // Capture texture data, not the material's display tint. Preview and the
+    // baked texture both receive that tint once through MeshStandardMaterial.
+    result = hasMap > 0.5 ? texel.rgb : fallbackColor;
   } else if ( channelMode == 1 ) {
-    result = vec3( clamp( texel.g * scalar, 0.0, 1.0 ) );
+    result = vec3( texel.g );
   } else if ( channelMode == 2 ) {
     result = hasMap > 0.5 ? texel.rgb : vec3( 0.5, 0.5, 1.0 );
   } else {
-    result = vec3( clamp( texel.b * scalar, 0.0, 1.0 ) );
+    result = vec3( texel.b );
   }
   gl_FragColor = vec4( result, 1.0 );
 }`,
@@ -243,7 +244,12 @@ void main() {
     const linearDepthCanvas = this.readTarget(this.linearDepthTarget);
     const compositeCanvas = this.makeComposite(baseColorCanvas, maskCanvas);
     return {
-      baseColorCanvas,
+      channelCanvases: {
+        baseColor: baseColorCanvas,
+        roughness: roughnessCanvas,
+        normal: normalCanvas,
+        metallic: metallicCanvas,
+      },
       maskCanvas,
       images: {
         baseColorPreviewDataUrl: baseColorCanvas.toDataURL("image/png"),
@@ -348,11 +354,6 @@ void main() {
     this.channelMaterial.uniforms.hasMap.value = texture ? 1 : 0;
     this.channelMaterial.uniforms.uvTransform.value.copy(texture?.matrix ?? new THREE.Matrix3());
     this.channelMaterial.uniforms.fallbackColor.value.copy(material.color);
-    this.channelMaterial.uniforms.scalar.value = channel === "roughness"
-      ? material.roughness
-      : channel === "metallic"
-        ? material.metalness
-        : 1;
   }
 
   private replaceMaterials(

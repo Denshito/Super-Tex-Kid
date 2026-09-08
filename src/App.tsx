@@ -4,6 +4,14 @@ import {
   type DecalImportRequest,
   type TextureImportRequest,
 } from "./features/viewport/Viewport3D";
+import { OpenRouterAiPanel } from "./features/ai/OpenRouterAiPanel";
+import { DeepSeekSettings } from "./features/ai/DeepSeekSettings";
+import type { DeepSeekKeyStatus } from "./features/ai/deepSeekApi";
+import {
+  clearOpenRouterKey,
+  configureOpenRouterKey,
+  type OpenRouterKeyStatus,
+} from "./features/ai/openRouterApi";
 import { useEditorStore } from "./state/editorStore";
 import type { CaptureTransformMode, MaterialChannel } from "./types/editor";
 import "./App.css";
@@ -13,6 +21,20 @@ const TRANSFORM_MODES: readonly [CaptureTransformMode, "W" | "E" | "R"][] = [
   ["rotate", "E"],
   ["scale", "R"],
 ];
+
+const DECAL_CHANNELS: readonly [MaterialChannel, string][] = [
+  ["baseColor", "Base Color"],
+  ["roughness", "Roughness"],
+  ["metallic", "Metallic"],
+  ["normal", "Normal"],
+];
+
+const WORKBENCH_TABS = {
+  orbit: [["surface", "Surface"], ["material", "Material"], ["lighting", "Lighting"]],
+  brush: [["selection", "Selection"], ["material", "Material"]],
+  capture: [["capture", "Capture"], ["passes", "Passes"]],
+  decal: [["ai", "AI Edit"], ["projection", "Projection"], ["bake", "Bake"]],
+} as const;
 
 /**
  * Top-level desktop editor shell.
@@ -27,12 +49,21 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textureInputRef = useRef<HTMLInputElement>(null);
   const decalInputRef = useRef<HTMLInputElement>(null);
+  const decalTargetRef = useRef<MaterialChannel>("baseColor");
   const textureTargetRef = useRef<{ materialId: string; channel: MaterialChannel } | null>(null);
   const textureRequestIdRef = useRef(0);
   const decalRequestIdRef = useRef(0);
   const [modelFile, setModelFile] = useState<File | null>(null);
   const [textureImport, setTextureImport] = useState<TextureImportRequest | null>(null);
   const [decalImport, setDecalImport] = useState<DecalImportRequest | null>(null);
+  const [workbenchTab, setWorkbenchTab] = useState<string>("surface");
+  const [workbenchOpen, setWorkbenchOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [keyStatus, setKeyStatus] = useState<OpenRouterKeyStatus | null>(null);
+  const [deepSeekStatus, setDeepSeekStatus] = useState<DeepSeekKeyStatus | null>(null);
+  const [connectingKey, setConnectingKey] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Subscribe to individual store slices so unrelated state changes do not
   // redraw the entire editor shell.
@@ -52,6 +83,7 @@ function App() {
   const captureActorVisible = useEditorStore((state) => state.captureActorVisible);
   const captureTransformMode = useEditorStore((state) => state.captureTransformMode);
   const decalSummary = useEditorStore((state) => state.decalSummary);
+  const activeDecalChannel = useEditorStore((state) => state.activeDecalChannel);
   const decalActorVisible = useEditorStore((state) => state.decalActorVisible);
   const decalPreviewVisible = useEditorStore((state) => state.decalPreviewVisible);
   const decalMaskEnabled = useEditorStore((state) => state.decalMaskEnabled);
@@ -62,21 +94,82 @@ function App() {
   const patchLightingSettings = useEditorStore((state) => state.patchLightingSettings);
   const patchColorAdjustment = useEditorStore((state) => state.patchColorAdjustment);
   const requestClearMask = useEditorStore((state) => state.requestClearMask);
-  const requestResetBaseColor = useEditorStore((state) => state.requestResetBaseColor);
-  const requestExportBaseColor = useEditorStore((state) => state.requestExportBaseColor);
+  const requestResetChannel = useEditorStore((state) => state.requestResetChannel);
+  const requestExportChannel = useEditorStore((state) => state.requestExportChannel);
   const setCaptureTransformMode = useEditorStore((state) => state.setCaptureTransformMode);
   const requestCreateCapture = useEditorStore((state) => state.requestCreateCapture);
   const setCaptureActorVisible = useEditorStore((state) => state.setCaptureActorVisible);
   const requestCaptureUpdate = useEditorStore((state) => state.requestCaptureUpdate);
   const requestCreateDecal = useEditorStore((state) => state.requestCreateDecal);
+  const setActiveDecalChannel = useEditorStore((state) => state.setActiveDecalChannel);
   const setDecalActorVisible = useEditorStore((state) => state.setDecalActorVisible);
   const setDecalPreviewVisible = useEditorStore((state) => state.setDecalPreviewVisible);
   const setDecalMaskEnabled = useEditorStore((state) => state.setDecalMaskEnabled);
+  const setDecalChannelEnabled = useEditorStore((state) => state.setDecalChannelEnabled);
   const requestBakeDecal = useEditorStore((state) => state.requestBakeDecal);
+  const setViewportStatus = useEditorStore((state) => state.setViewportStatus);
+
+  useEffect(() => {
+    const firstTab = toolMode === "decal" && !decalSummary
+      ? "projection"
+      : WORKBENCH_TABS[toolMode][0][0];
+    setWorkbenchTab(firstTab);
+  }, [toolMode]);
+
+  useEffect(() => {
+    if (toolMode === "decal" && decalSummary) setWorkbenchTab("ai");
+  }, [decalSummary?.sessionId]);
+
+  const closeSettings = (): void => {
+    setSettingsOpen(false);
+    setApiKeyInput("");
+    setConnectionError(null);
+  };
+
+  const connectOpenRouter = async (): Promise<void> => {
+    if (!apiKeyInput.trim() || connectingKey) return;
+    setConnectingKey(true);
+    setConnectionError(null);
+    try {
+      const status = await configureOpenRouterKey(apiKeyInput.trim());
+      setKeyStatus(status);
+      setViewportStatus({ kind: "ready", message: "OpenRouter connected for this session" });
+      closeSettings();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setConnectionError(message);
+      setViewportStatus({ kind: "error", message: `OpenRouter connection failed: ${message}` });
+    } finally {
+      setConnectingKey(false);
+    }
+  };
+
+  const applyGeneratedDecal = (blob: Blob, label: string, origin: "capture" | "generated"): void => {
+    decalRequestIdRef.current += 1;
+    setDecalImport({
+      id: decalRequestIdRef.current,
+      channel: "baseColor",
+      blob,
+      label,
+      origin,
+    });
+    setDecalPreviewVisible(true);
+  };
 
   const canAdjustBaseColor = Boolean(
     activeTextureSet?.channels.baseColor.isLoaded && activeMask?.hasContent,
   );
+  const activeDecalSource = decalSummary?.channels[activeDecalChannel] ?? null;
+  const activeDecalTarget = decalSummary?.targetTextureSet.channels[activeDecalChannel] ?? null;
+  const enabledDecalChannels = decalSummary
+    ? DECAL_CHANNELS.filter(([channel]) => decalSummary.channels[channel].enabled)
+    : [];
+  const missingDecalTargets = decalSummary
+    ? enabledDecalChannels.filter(([channel]) => (
+      !decalSummary.targetTextureSet.channels[channel].isLoaded
+    ))
+    : [];
+  const canBakeDecal = enabledDecalChannels.length > 0 && missingDecalTargets.length === 0;
 
   const patchCaptureSettings = (
     patch: Partial<{ near: number; far: number; resolution: number }>,
@@ -195,44 +288,57 @@ function App() {
               const file = event.currentTarget.files?.[0];
               if (!file) return;
               decalRequestIdRef.current += 1;
-              setDecalImport({ id: decalRequestIdRef.current, file });
+              setDecalImport({
+                id: decalRequestIdRef.current,
+                channel: decalTargetRef.current,
+                blob: file,
+                label: file.name,
+                origin: "file",
+              });
             }}
           />
           <button className="button button-primary" onClick={() => fileInputRef.current?.click()}>
             Import GLB
           </button>
+          <button className="button" onClick={() => setSettingsOpen(true)}>
+            <span className={`connection-dot ${keyStatus?.configured ? "is-connected" : ""}`} />
+            AI Settings
+          </button>
+          <button className="button workbench-toggle" onClick={() => setWorkbenchOpen((open) => !open)}>
+            Panel
+          </button>
         </div>
       </header>
 
-      <section className="workspace">
+      <section className={`workspace mode-${toolMode}`}>
         <aside className="tool-rail" aria-label="Texture tools">
           <button
             className={`tool-button ${toolMode === "orbit" ? "is-active" : ""}`}
             title="Orbit mode"
-            onClick={() => setToolMode("orbit")}
+            onClick={() => { setToolMode("orbit"); setWorkbenchOpen(true); }}
           >
             ◉
           </button>
           <button
             className={`tool-button ${toolMode === "brush" ? "is-active" : ""}`}
             title="Screen-space brush"
-            onClick={() => setToolMode("brush")}
+            onClick={() => { setToolMode("brush"); setWorkbenchOpen(true); }}
           >
             ✎
           </button>
           <button
             className={`tool-button ${toolMode === "capture" ? "is-active" : ""}`}
             title="Projection Capture Actor"
-            disabled={!captureSummary}
-            onClick={() => setToolMode("capture")}
+            disabled={!activeMask?.hasContent}
+            onClick={() => { setToolMode("capture"); setWorkbenchOpen(true); }}
           >
             C
           </button>
           <button
             className={`tool-button ${toolMode === "decal" ? "is-active" : ""}`}
             title="Decal Actor"
-            disabled={!decalSummary}
-            onClick={() => setToolMode("decal")}
+            disabled={!captureSummary}
+            onClick={() => { setToolMode("decal"); setWorkbenchOpen(true); }}
           >
             D
           </button>
@@ -245,50 +351,6 @@ function App() {
             textureImport={textureImport}
             decalImport={decalImport}
           />
-          {captureSummary && (
-            <section className="capture-preview-window" aria-label="Projection capture preview">
-              <div className="capture-preview-header">
-                <div>
-                  <span>CAPTURE PREVIEW</span>
-                  <b>{captureSummary.resolution} × {captureSummary.resolution}</b>
-                </div>
-                <span className="live-badge">LIVE</span>
-              </div>
-              <div className="capture-preview-main checkerboard">
-                <img src={captureSummary.compositePreviewDataUrl} alt="Surface capture with selection overlay" />
-              </div>
-              <div className="capture-preview-passes">
-                <figure>
-                  <img src={captureSummary.baseColorPreviewDataUrl} alt="Captured unlit Base Color" />
-                  <figcaption>Base Color</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.roughnessPreviewDataUrl} alt="Captured Roughness" />
-                  <figcaption>Roughness</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.materialNormalPreviewDataUrl} alt="Captured tangent-space material Normal" />
-                  <figcaption>Material Normal</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.metallicPreviewDataUrl} alt="Captured Metallic" />
-                  <figcaption>Metallic</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.maskPreviewDataUrl} alt="Captured selection mask" />
-                  <figcaption>Mask</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.viewNormalPreviewDataUrl} alt="Captured view-space geometry Normal" />
-                  <figcaption>View Normal</figcaption>
-                </figure>
-                <figure>
-                  <img src={captureSummary.linearDepthPreviewDataUrl} alt="Captured linear camera depth" />
-                  <figcaption>Linear Depth</figcaption>
-                </figure>
-              </div>
-            </section>
-          )}
           <div className="viewport-hint">
             {toolMode === "brush"
               ? "Brush mode · Drag across visible surfaces · Each stroke locks one material"
@@ -300,8 +362,57 @@ function App() {
           </div>
         </section>
 
-        <aside className="inspector" aria-label="Inspector">
-          <details className="inspector-section" open>
+        <aside className={`inspector workbench ${workbenchOpen ? "is-open" : ""}`} aria-label="Context workbench">
+          <header className="workbench-header">
+            <div><span>{toolMode.toUpperCase()}</span><b>{modelName}</b></div>
+            <button className="workbench-close" onClick={() => setWorkbenchOpen(false)} aria-label="Close panel">×</button>
+          </header>
+          <nav className="workbench-tabs" aria-label={`${toolMode} workbench tabs`}>
+            {WORKBENCH_TABS[toolMode].map(([tab, label]) => (
+              <button key={tab} className={workbenchTab === tab ? "is-active" : ""} onClick={() => setWorkbenchTab(tab)}>{label}</button>
+            ))}
+          </nav>
+          {toolMode === "decal" && decalSummary ? (
+            <label className="decal-live-toggle">
+              <span><i className={decalPreviewVisible ? "is-live" : ""} />Live Decal Preview</span>
+              <input type="checkbox" checked={decalPreviewVisible}
+                onChange={(event) => setDecalPreviewVisible(event.currentTarget.checked)} />
+            </label>
+          ) : null}
+
+          <section className="workbench-panel" data-active={workbenchTab === "ai"}>
+            <OpenRouterAiPanel
+              capture={captureSummary}
+              decal={decalSummary}
+              keyStatus={keyStatus}
+              deepSeekStatus={deepSeekStatus}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onApplyGenerated={applyGeneratedDecal}
+              onStatus={setViewportStatus}
+            />
+          </section>
+
+          <section className="workbench-panel capture-passes-panel" data-active={workbenchTab === "passes"}>
+            {captureSummary ? (
+              <>
+                <div className="capture-preview-header"><div><span>CAPTURE OUTPUT</span><b>{captureSummary.resolution} × {captureSummary.resolution}</b></div><span className="live-badge">LIVE</span></div>
+                <div className="capture-preview-main checkerboard"><img src={captureSummary.compositePreviewDataUrl} alt="Surface capture with selection overlay" /></div>
+                <div className="capture-preview-passes">
+                  {([
+                    [captureSummary.baseColorPreviewDataUrl, "Base Color"],
+                    [captureSummary.roughnessPreviewDataUrl, "Roughness"],
+                    [captureSummary.materialNormalPreviewDataUrl, "Material Normal"],
+                    [captureSummary.metallicPreviewDataUrl, "Metallic"],
+                    [captureSummary.maskPreviewDataUrl, "Mask"],
+                    [captureSummary.viewNormalPreviewDataUrl, "View Normal"],
+                    [captureSummary.linearDepthPreviewDataUrl, "Linear Depth"],
+                  ] as const).map(([src, label]) => <figure key={label}><img src={src} alt={label} /><figcaption>{label}</figcaption></figure>)}
+                </div>
+              </>
+            ) : <p className="empty-copy panel-section">Create a Capture Actor to inspect its texture passes.</p>}
+          </section>
+
+          <details className="inspector-section" open data-active={workbenchTab === "surface"}>
             <summary>
               <span className="section-title">Asset &amp; Surface</span>
               <span className="section-meta">{activeSurface?.materialName ?? "No surface"}</span>
@@ -351,7 +462,7 @@ function App() {
             </div>
           </details>
 
-          <details className="inspector-section" open>
+          <details className="inspector-section" open data-active={workbenchTab === "selection"}>
             <summary>
               <span className="section-title">Selection</span>
               <span className="section-meta">{activeMask?.hasContent ? `${activeMask.width} × ${activeMask.height}` : "Empty"}</span>
@@ -399,7 +510,7 @@ function App() {
             </div>
           </details>
 
-          <details className="inspector-section" open>
+          <details className="inspector-section" open data-active={workbenchTab === "capture"}>
             <summary>
               <span className="section-title">Projection Capture</span>
               <span className="section-meta">{captureSummary ? `${captureSummary.resolution}px` : "Not created"}</span>
@@ -450,11 +561,8 @@ function App() {
             </div>
           </details>
 
-          <details className="inspector-section">
-            <summary>
-              <span className="section-title">Decal &amp; Bake</span>
-              <span className="section-meta">{decalSummary?.sourceLabel ?? "Not created"}</span>
-            </summary>
+          <details className="inspector-section" open data-active={workbenchTab === "projection"}>
+            <summary><span className="section-title">Decal Projection</span></summary>
             <div className="panel-section">
               <button className="button button-primary capture-create-button" disabled={!captureSummary}
                 onClick={() => { setToolMode("decal"); requestCreateDecal(); }}>
@@ -468,37 +576,89 @@ function App() {
                   </button>
                 ))}
               </div>
+              {decalSummary ? <>
+                <label className="capture-mask-toggle"><input type="checkbox" checked={decalMaskEnabled}
+                  onChange={(event) => setDecalMaskEnabled(event.currentTarget.checked)} />Use Capture Mask</label>
+                <label className="capture-mask-toggle"><input type="checkbox" checked={decalActorVisible}
+                  onChange={(event) => setDecalActorVisible(event.currentTarget.checked)} />Show Decal Actor</label>
+                <label className="capture-mask-toggle"><input type="checkbox" checked={decalPreviewVisible}
+                  onChange={(event) => setDecalPreviewVisible(event.currentTarget.checked)} />Show Decal Preview</label>
+                <p className="capture-volume-readout">Box {decalSummary.width.toFixed(2)} × {decalSummary.height.toFixed(2)}</p>
+                <p className="field-note">Move, rotate, or scale the projector before baking. W/E/R shortcuts follow the active Actor.</p>
+              </> : <p className="field-note">Finish a Capture first. The Decal inherits its projector transform and mask.</p>}
+            </div>
+          </details>
+
+          <details className="inspector-section" open data-active={workbenchTab === "bake"}>
+            <summary>
+              <span className="section-title">Decal &amp; Bake</span>
+              <span className="section-meta">{activeDecalSource?.sourceLabel ?? "Not created"}</span>
+            </summary>
+            <div className="panel-section">
               {decalSummary ? (
                 <>
-                  <div className="mask-preview checkerboard">
-                    <img src={decalSummary.previewDataUrl} alt="Current Decal source" />
+                  <div className="decal-channel-tabs" role="tablist" aria-label="Decal channel">
+                    {DECAL_CHANNELS.map(([channel, label]) => (
+                      <button
+                        key={channel}
+                        type="button"
+                        role="tab"
+                        aria-selected={activeDecalChannel === channel}
+                        className={activeDecalChannel === channel ? "is-active" : ""}
+                        onClick={() => setActiveDecalChannel(channel)}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
-                  <p className="field-note">{decalSummary.sourceLabel} · {decalSummary.sourceOrigin}</p>
+                  <div className="mask-preview checkerboard">
+                    <img
+                      src={activeDecalSource?.previewDataUrl}
+                      alt={`${activeDecalChannel} Decal source`}
+                    />
+                  </div>
+                  <p className="field-note">
+                    {activeDecalSource?.sourceLabel} · {activeDecalSource?.sourceOrigin}
+                  </p>
+                  <label className="capture-mask-toggle">
+                    <input
+                      type="checkbox"
+                      checked={activeDecalSource?.enabled ?? false}
+                      onChange={(event) => setDecalChannelEnabled(
+                        activeDecalChannel,
+                        event.currentTarget.checked,
+                      )}
+                    />Enable Channel
+                  </label>
                   <button className="button full-width-button" onClick={() => {
                     if (!decalInputRef.current) return;
+                    decalTargetRef.current = activeDecalChannel;
                     decalInputRef.current.value = "";
                     decalInputRef.current.click();
-                  }}>Import Decal Image</button>
-                  <label className="capture-mask-toggle">
-                    <input type="checkbox" checked={decalMaskEnabled}
-                      onChange={(event) => setDecalMaskEnabled(event.currentTarget.checked)} />Use Capture Mask
-                  </label>
-                  <label className="capture-mask-toggle">
-                    <input type="checkbox" checked={decalActorVisible}
-                      onChange={(event) => setDecalActorVisible(event.currentTarget.checked)} />Show Decal Actor
-                  </label>
-                  <label className="capture-mask-toggle">
-                    <input type="checkbox" checked={decalPreviewVisible}
-                      onChange={(event) => setDecalPreviewVisible(event.currentTarget.checked)} />Show Decal Preview
-                  </label>
-                  <p className="capture-volume-readout">Box {decalSummary.width.toFixed(2)} × {decalSummary.height.toFixed(2)}</p>
+                  }}>Import {DECAL_CHANNELS.find(([channel]) => channel === activeDecalChannel)?.[1]} Decal</button>
+                  {activeDecalTarget?.isLoaded ? (
+                    <p className="field-note">
+                      Target: {activeDecalTarget.fileName} · {activeDecalTarget.width}×{activeDecalTarget.height}
+                    </p>
+                  ) : (
+                    <p className="field-note status-inline-error">Missing Target Map</p>
+                  )}
+                  {missingDecalTargets.length > 0 ? (
+                    <p className="field-note status-inline-error">
+                      Import target maps: {missingDecalTargets.map(([, label]) => label).join(", ")}
+                    </p>
+                  ) : null}
                   <div className="effect-actions decal-actions">
-                    <button className="button button-primary" disabled={!activeTextureSet?.channels.baseColor.isLoaded}
-                      onClick={requestBakeDecal}>Bake to BaseColor</button>
-                    <button className="button" disabled={!activeTextureSet?.channels.baseColor.isModified}
-                      onClick={requestResetBaseColor}>Reset Bake</button>
-                    <button className="button" disabled={!activeTextureSet?.channels.baseColor.isLoaded}
-                      onClick={requestExportBaseColor}>Export PNG</button>
+                    <button className="button button-primary" disabled={!canBakeDecal}
+                      onClick={requestBakeDecal}>Bake Enabled Channels</button>
+                    <button className="button" disabled={!activeDecalTarget?.isModified}
+                      onClick={() => requestResetChannel(decalSummary.textureSetId, activeDecalChannel)}>
+                      Reset Channel
+                    </button>
+                    <button className="button" disabled={!activeDecalTarget?.isLoaded}
+                      onClick={() => requestExportChannel(decalSummary.textureSetId, activeDecalChannel)}>
+                      Export Channel
+                    </button>
                   </div>
                 </>
               ) : (
@@ -507,7 +667,7 @@ function App() {
             </div>
           </details>
 
-          <details className="inspector-section">
+          <details className="inspector-section" open data-active={workbenchTab === "material"}>
             <summary>
               <span className="section-title">Material</span>
               <span className="section-meta">{activeTextureSet?.materialName ?? "No material"}</span>
@@ -553,9 +713,9 @@ function App() {
                 </label>
                 <div className="effect-actions">
                   <button className="button" disabled={!activeTextureSet?.channels.baseColor.isLoaded}
-                    onClick={requestResetBaseColor}>Reset</button>
+                    onClick={() => requestResetChannel(activeSurface?.materialId ?? null, "baseColor")}>Reset</button>
                   <button className="button button-primary" disabled={!canAdjustBaseColor}
-                    onClick={requestExportBaseColor}>Export PNG</button>
+                    onClick={() => requestExportChannel(activeSurface?.materialId ?? null, "baseColor")}>Export PNG</button>
                 </div>
               </div>
               <div className="inspector-subsection">
@@ -580,7 +740,7 @@ function App() {
             </div>
           </details>
 
-          <details className="inspector-section">
+          <details className="inspector-section" open data-active={workbenchTab === "lighting"}>
             <summary>
               <span className="section-title">Lighting</span>
               <span className="section-meta">IBL {lightingSettings.environmentIntensity.toFixed(2)}</span>
@@ -615,6 +775,35 @@ function App() {
           </details>
         </aside>
       </section>
+
+      {settingsOpen ? (
+        <div className="settings-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closeSettings();
+        }}>
+          <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+            <header><div><span>SESSION CONNECTIONS</span><h2 id="ai-settings-title">AI Services</h2></div><button onClick={closeSettings} aria-label="Close settings">×</button></header>
+            <p>Your API key is validated by the Rust backend and kept only in process memory. It is never written to browser storage, project files, or Git.</p>
+            <label>Image Generation · OpenRouter API Key
+              <input type="password" autoComplete="off" value={apiKeyInput} placeholder="sk-or-v1-…"
+                onChange={(event) => setApiKeyInput(event.currentTarget.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void connectOpenRouter(); }} />
+            </label>
+            {keyStatus?.configured ? <div className="key-status"><span className="connection-dot is-connected" /><span><b>{keyStatus.label ?? "Connected key"}</b><small>{keyStatus.limitRemaining == null ? "Balance unavailable" : `$${keyStatus.limitRemaining.toFixed(4)} remaining`}</small></span></div> : null}
+            {connectionError ? <p className="settings-error">{connectionError}</p> : null}
+            <footer>
+              {keyStatus?.configured ? <button className="button" onClick={() => {
+                void clearOpenRouterKey().then(() => {
+                  setKeyStatus(null);
+                  setViewportStatus({ kind: "ready", message: "OpenRouter disconnected" });
+                  closeSettings();
+                }).catch((reason: unknown) => setViewportStatus({ kind: "error", message: String(reason) }));
+              }}>Disconnect</button> : <span />}
+              <button className="button button-primary" disabled={!apiKeyInput.trim() || connectingKey} onClick={() => void connectOpenRouter()}>{connectingKey ? "Connecting…" : "Connect"}</button>
+            </footer>
+            <DeepSeekSettings status={deepSeekStatus} onChange={setDeepSeekStatus} />
+          </section>
+        </div>
+      ) : null}
 
       <footer className="status-bar">
         {/* The status kind also selects the colored CSS indicator. */}

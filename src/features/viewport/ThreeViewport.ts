@@ -148,6 +148,7 @@ export class ThreeViewport {
   private lastCaptureTime = 0;
   private captureActorVisible = true;
   private decalActor: DecalActor | null = null;
+  private decalSessionId = 0;
   private decalDirty = false;
   private lastDecalTime = 0;
   private decalActorVisible = true;
@@ -245,6 +246,7 @@ export class ThreeViewport {
   setToolMode(toolMode: ToolMode): void {
     this.toolMode = toolMode;
     this.controls.enabled = toolMode !== "brush";
+    for (const overlay of this.overlays.values()) overlay.setEnabled(toolMode !== "decal");
     this.syncActorVisibility();
     this.renderer.domElement.classList.toggle("is-brush-mode", toolMode === "brush");
     if (toolMode !== "brush") this.hideBrushCursor();
@@ -318,7 +320,7 @@ export class ThreeViewport {
     this.decalActor = new DecalActor(
       this.captureActor,
       this.captureMaterialId,
-      this.captureRuntime.baseColorCanvas,
+      this.captureRuntime.channelCanvases,
       this.captureRuntime.maskCanvas,
     );
     this.scene.add(this.decalActor.root);
@@ -331,6 +333,7 @@ export class ThreeViewport {
     this.decalActorVisible = true;
     this.decalPreviewVisible = true;
     this.decalRenderer.rebuild(this.contentRoot, this.decalActor, targetMaterial);
+    this.decalSessionId += 1;
     this.syncActorVisibility();
     this.markDecalDirty(true);
     this.publishDecal();
@@ -351,24 +354,46 @@ export class ThreeViewport {
     this.publishDecal();
   }
 
+  setDecalChannelEnabled(channel: MaterialChannel, enabled: boolean): void {
+    if (!this.decalActor) return;
+    this.decalActor.setChannelEnabled(channel, enabled);
+    this.markDecalDirty(true);
+    this.publishDecal();
+  }
+
   bakeDecal(): DecalBakeResult {
     const actor = this.decalActor;
     if (!actor) throw new Error("Create a Decal Actor before baking");
     const textureSet = this.textureSets.get(actor.targetMaterialId);
-    const source = textureSet?.getBaseColorSource();
-    if (!textureSet || !source || source.width <= 0 || source.height <= 0) {
-      throw new Error("Bake requires an imported Base Color texture with a known resolution");
+    if (!textureSet) throw new Error("The target Texture Set is no longer available");
+    const enabledChannels = actor.getEnabledChannels();
+    if (enabledChannels.length === 0) throw new Error("Enable at least one Decal channel before baking");
+    const sources = new Map<MaterialChannel, NonNullable<ReturnType<TextureSetRuntime["getChannelSource"]>>>();
+    const missingChannels: MaterialChannel[] = [];
+    for (const channel of enabledChannels) {
+      const source = textureSet.getChannelSource(channel);
+      if (!source || source.width <= 0 || source.height <= 0) {
+        missingChannels.push(channel);
+      } else {
+        sources.set(channel, source);
+      }
     }
-    const canvas = this.decalRenderer.bake(actor, source, this.captureResolution);
-    textureSet.applyBakedBaseColor(canvas);
-    this.colorAdjustments.delete(actor.targetMaterialId);
+    if (missingChannels.length > 0) {
+      throw new Error(`Import target maps before baking: ${missingChannels.join(", ")}`);
+    }
+    const canvases = this.decalRenderer.bake(actor, sources, this.captureResolution);
+    textureSet.applyBakedChannels(canvases);
+    if (canvases.has("baseColor")) this.colorAdjustments.delete(actor.targetMaterialId);
     this.setDecalPreviewVisible(false);
     this.publishTextureSet(actor.targetMaterialId);
+    this.publishDecal();
     const result: DecalBakeResult = {
       textureSetId: actor.targetMaterialId,
-      width: canvas.width,
-      height: canvas.height,
-      processedPixels: canvas.width * canvas.height,
+      channels: Object.fromEntries(Array.from(canvases, ([channel, canvas]) => [channel, {
+        width: canvas.width,
+        height: canvas.height,
+        processedPixels: canvas.width * canvas.height,
+      }])),
     };
     this.callbacks.onDecalBaked(result);
     return result;
@@ -472,7 +497,10 @@ export class ThreeViewport {
     if (channel === "baseColor") this.colorAdjustments.delete(materialId);
     this.publishTextureSet(materialId);
     if (this.captureMaterialId === materialId) this.markCaptureDirty(true);
-    if (this.decalActor?.targetMaterialId === materialId) this.markDecalDirty(true);
+    if (this.decalActor?.targetMaterialId === materialId) {
+      this.markDecalDirty(true);
+      this.publishDecal();
+    }
   }
 
   /** Coalesces rapid slider input; the animation loop renders once per frame. */
@@ -485,32 +513,45 @@ export class ThreeViewport {
     this.pendingColorAdjustment = { materialId, settings };
   }
 
-  resetBaseColorAdjustment(materialId: string | null): void {
+  resetChannel(materialId: string | null, channel: MaterialChannel): void {
     if (!materialId) return;
-    this.pendingColorAdjustment = null;
-    this.colorAdjustments.delete(materialId);
-    this.textureSets.get(materialId)?.resetBaseColor();
+    if (channel === "baseColor") {
+      this.pendingColorAdjustment = null;
+      this.colorAdjustments.delete(materialId);
+    }
+    this.textureSets.get(materialId)?.resetChannel(channel);
     this.publishTextureSet(materialId);
     if (this.captureMaterialId === materialId) this.markCaptureDirty(true);
+    if (this.decalActor?.targetMaterialId === materialId) {
+      this.markDecalDirty(true);
+      this.publishDecal();
+    }
   }
 
-  async exportBaseColor(
+  async exportChannel(
     materialId: string | null,
+    channel: MaterialChannel,
     settings: ColorAdjustmentSettings,
   ): Promise<boolean> {
     if (!materialId) return false;
     const textureSet = this.textureSets.get(materialId);
     const mask = this.masks.get(materialId)?.mask;
-    if (!textureSet || !mask) return false;
+    if (!textureSet || (channel === "baseColor" && !mask)) return false;
 
-    const blob = await textureSet.exportBaseColor(mask, settings);
+    const blob = await textureSet.exportChannel(channel, mask, settings);
     if (!blob) return false;
     const materialName = this.materials.get(materialId)?.name || "Material";
     const safeName = materialName.replace(/[^a-z0-9_-]+/gi, "_");
+    const channelLabel = {
+      baseColor: "BaseColor",
+      roughness: "Roughness",
+      metallic: "Metallic",
+      normal: "Normal",
+    }[channel];
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${safeName}_BaseColor.png`;
+    anchor.download = `${safeName}_${channelLabel}.png`;
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     return true;
@@ -1139,6 +1180,9 @@ export class ThreeViewport {
 
     const gridVisible = this.grid.visible;
     const helperVisible = this.transformControlsHelper.visible;
+    const decalGizmo = this.decalActor?.gizmo;
+    const decalGizmoVisible = decalGizmo?.visible ?? false;
+    if (decalGizmo) decalGizmo.visible = false;
     this.grid.visible = false;
     this.transformControlsHelper.visible = false;
     const decalPreviewWasVisible = this.decalPreviewVisible;
@@ -1152,7 +1196,7 @@ export class ThreeViewport {
         captureMaterial,
         record.mask,
         (enabled) => {
-          for (const overlay of this.overlays.values()) overlay.setEnabled(enabled);
+          for (const overlay of this.overlays.values()) overlay.setEnabled(enabled && this.toolMode !== "decal");
         },
         this.captureResolution,
       );
@@ -1173,6 +1217,7 @@ export class ThreeViewport {
       this.callbacks.onCaptureError(message);
     } finally {
       this.grid.visible = gridVisible;
+      if (decalGizmo) decalGizmo.visible = decalGizmoVisible;
       this.transformControlsHelper.visible = helperVisible;
       this.decalRenderer.setPreviewVisible(decalPreviewWasVisible);
     }
@@ -1199,16 +1244,21 @@ export class ThreeViewport {
       this.callbacks.onDecalChanged(null);
       return;
     }
+    const targetTextureSet = this.textureSets.get(actor.targetMaterialId)?.getSummary();
+    if (!targetTextureSet) {
+      this.callbacks.onDecalChanged(null);
+      return;
+    }
     this.callbacks.onDecalChanged({
+      sessionId: this.decalSessionId,
       textureSetId: actor.targetMaterialId,
-      sourceLabel: actor.getSourceLabel(),
-      sourceOrigin: actor.getSourceOrigin(),
+      targetTextureSet,
       useCaptureMask: actor.getUseCaptureMask(),
       width: actor.getWidth(),
       height: actor.getHeight(),
       near: actor.getNear(),
       far: actor.getFar(),
-      previewDataUrl: actor.toPreviewDataUrl(),
+      channels: actor.getChannelSummaries(),
     });
   }
 

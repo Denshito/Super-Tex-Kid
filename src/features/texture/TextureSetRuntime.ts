@@ -14,7 +14,8 @@ interface ChannelAsset {
   height: number;
 }
 
-export interface BaseColorSource {
+export interface TextureChannelSource {
+  channel: MaterialChannel;
   texture: THREE.Texture;
   width: number;
   height: number;
@@ -33,9 +34,9 @@ export class TextureSetRuntime {
   private adjustedCanvas: HTMLCanvasElement | null = null;
   private previewMaskCanvas: HTMLCanvasElement | null = null;
   private previewTexture: THREE.CanvasTexture | null = null;
-  private bakedCanvas: HTMLCanvasElement | null = null;
-  private bakedTexture: THREE.CanvasTexture | null = null;
-  private baseColorModified = false;
+  private readonly bakedCanvases = new Map<MaterialChannel, HTMLCanvasElement>();
+  private readonly bakedTextures = new Map<MaterialChannel, THREE.CanvasTexture>();
+  private readonly modifiedChannels = new Set<MaterialChannel>();
 
   constructor(private readonly material: THREE.MeshStandardMaterial) {
     this.registerExistingMaps();
@@ -44,8 +45,8 @@ export class TextureSetRuntime {
   setTexture(channel: MaterialChannel, texture: THREE.Texture, fileName?: string): void {
     if (channel === "baseColor") {
       this.disposeWorkingPreview();
-      this.disposeBakedBaseColor();
     }
+    this.disposeBakedChannel(channel);
     const { width, height } = this.readTextureSize(texture);
     this.channels.set(channel, {
       texture,
@@ -55,31 +56,51 @@ export class TextureSetRuntime {
     });
   }
 
-  getBaseColorSource(): BaseColorSource | null {
-    const source = this.channels.get("baseColor");
-    return source ? { texture: source.texture, width: source.width, height: source.height } : null;
+  getChannelSource(channel: MaterialChannel): TextureChannelSource | null {
+    const source = this.channels.get(channel);
+    return source ? {
+      channel,
+      texture: source.texture,
+      width: source.width,
+      height: source.height,
+    } : null;
   }
 
-  /** Installs one full-resolution bake while keeping the imported source intact. */
-  applyBakedBaseColor(canvas: HTMLCanvasElement): void {
-    const source = this.channels.get("baseColor");
-    if (!source) throw new Error("Bake requires an imported Base Color texture");
-    this.disposeWorkingPreview();
-    this.disposeBakedBaseColor();
-    this.bakedCanvas = canvas;
-    this.bakedTexture = new THREE.CanvasTexture(canvas);
-    this.bakedTexture.name = `BakedBaseColor:${this.material.uuid}`;
-    this.bakedTexture.colorSpace = THREE.SRGBColorSpace;
-    // UV-space bake canvases store V=0 at the top to match GLTF image rows.
-    this.bakedTexture.flipY = false;
-    this.bakedTexture.wrapS = source.texture.wrapS;
-    this.bakedTexture.wrapT = source.texture.wrapT;
-    this.bakedTexture.minFilter = THREE.LinearFilter;
-    this.bakedTexture.magFilter = THREE.LinearFilter;
-    this.bakedTexture.generateMipmaps = false;
-    this.material.map = this.bakedTexture;
+  /** Installs a complete multi-channel bake only after every texture is ready. */
+  applyBakedChannels(canvases: Map<MaterialChannel, HTMLCanvasElement>): void {
+    const prepared = new Map<MaterialChannel, THREE.CanvasTexture>();
+    try {
+      for (const [channel, canvas] of canvases) {
+        const source = this.channels.get(channel);
+        if (!source) throw new Error(`Bake requires an imported ${this.channelLabel(channel)} texture`);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.name = `Baked${this.channelLabel(channel)}:${this.material.uuid}`;
+        texture.colorSpace = channel === "baseColor" ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        // UV-space bake canvases store V=0 at the top to match GLTF image rows.
+        texture.flipY = false;
+        texture.wrapS = source.texture.wrapS;
+        texture.wrapT = source.texture.wrapT;
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.generateMipmaps = false;
+        prepared.set(channel, texture);
+      }
+    } catch (error) {
+      for (const texture of prepared.values()) texture.dispose();
+      throw error;
+    }
+
+    if (canvases.has("baseColor")) this.disposeWorkingPreview();
+    for (const [channel, canvas] of canvases) {
+      this.disposeBakedChannel(channel);
+      const texture = prepared.get(channel);
+      if (!texture) continue;
+      this.bakedCanvases.set(channel, canvas);
+      this.bakedTextures.set(channel, texture);
+      this.modifiedChannels.add(channel);
+      this.assignMaterialTexture(channel, texture);
+    }
     this.material.needsUpdate = true;
-    this.baseColorModified = true;
   }
 
   getSummary(): TextureSetSummary {
@@ -100,13 +121,14 @@ export class TextureSetRuntime {
     const source = this.channels.get("baseColor");
     if (!source || source.width <= 0 || source.height <= 0) return false;
     if (this.isNeutral(settings) || !mask.hasContent) {
-      if (this.bakedTexture) {
+      const bakedTexture = this.bakedTextures.get("baseColor");
+      if (bakedTexture) {
         this.disposeWorkingPreview();
-        this.material.map = this.bakedTexture;
+        this.material.map = bakedTexture;
         this.material.needsUpdate = true;
-        this.baseColorModified = true;
+        this.modifiedChannels.add("baseColor");
       } else {
-        this.resetBaseColor();
+        this.resetChannel("baseColor");
       }
       return true;
     }
@@ -114,7 +136,7 @@ export class TextureSetRuntime {
     const scale = Math.min(1, 1024 / Math.max(source.width, source.height));
     const width = Math.max(1, Math.round(source.width * scale));
     const height = Math.max(1, Math.round(source.height * scale));
-    const effectSource = this.bakedTexture ?? source.texture;
+    const effectSource = this.bakedTextures.get("baseColor") ?? source.texture;
     this.ensurePreviewResources(width, height, effectSource);
     if (!this.previewCanvas || !this.adjustedCanvas || !this.previewTexture) return false;
 
@@ -128,30 +150,37 @@ export class TextureSetRuntime {
     this.previewTexture.needsUpdate = true;
     this.material.map = this.previewTexture;
     this.material.needsUpdate = true;
-    this.baseColorModified = true;
+    this.modifiedChannels.add("baseColor");
     return true;
   }
 
-  resetBaseColor(): void {
-    const source = this.channels.get("baseColor");
-    if (source && this.material.map !== source.texture) {
-      this.material.map = source.texture;
-      this.material.needsUpdate = true;
-    }
-    this.disposeBakedBaseColor();
-    this.baseColorModified = false;
+  resetChannel(channel: MaterialChannel): void {
+    const source = this.channels.get(channel);
+    if (!source) return;
+    if (channel === "baseColor") this.disposeWorkingPreview();
+    this.assignMaterialTexture(channel, source.texture);
+    this.disposeBakedChannel(channel);
+    this.modifiedChannels.delete(channel);
+    this.material.needsUpdate = true;
   }
 
-  /** Produces a full-resolution PNG without replacing the live preview map. */
-  async exportBaseColor(
-    mask: SelectionMask,
-    settings: ColorAdjustmentSettings,
+  /** Produces one full-resolution channel PNG without changing the material. */
+  async exportChannel(
+    channel: MaterialChannel,
+    mask?: SelectionMask,
+    settings?: ColorAdjustmentSettings,
   ): Promise<Blob | null> {
-    const source = this.channels.get("baseColor");
+    const source = this.channels.get(channel);
     if (!source || source.width <= 0 || source.height <= 0) return null;
 
-    if (this.bakedCanvas && (this.isNeutral(settings) || !mask.hasContent)) {
-      return await new Promise((resolve) => this.bakedCanvas?.toBlob(resolve, "image/png"));
+    const bakedCanvas = this.bakedCanvases.get(channel);
+    if (channel !== "baseColor") {
+      if (bakedCanvas) return await new Promise((resolve) => bakedCanvas.toBlob(resolve, "image/png"));
+      return await this.textureToBlob(source);
+    }
+    if (!mask || !settings) return null;
+    if (bakedCanvas && (this.isNeutral(settings) || !mask.hasContent)) {
+      return await new Promise((resolve) => bakedCanvas.toBlob(resolve, "image/png"));
     }
 
     const output = document.createElement("canvas");
@@ -168,7 +197,7 @@ export class TextureSetRuntime {
       this.renderComposite(
         output,
         adjusted,
-        this.bakedTexture ?? source.texture,
+        this.bakedTextures.get("baseColor") ?? source.texture,
         mask.sourceCanvas,
         settings,
       );
@@ -178,7 +207,7 @@ export class TextureSetRuntime {
   }
 
   dispose(): void {
-    this.resetBaseColor();
+    for (const channel of this.channels.keys()) this.resetChannel(channel);
     this.disposeWorkingPreview();
     this.channels.clear();
   }
@@ -199,7 +228,7 @@ export class TextureSetRuntime {
       height: asset?.height ?? 0,
       colorSpace: channel === "baseColor" ? "srgb" : "linear",
       isLoaded: Boolean(asset),
-      isModified: channel === "baseColor" && this.baseColorModified,
+      isModified: this.modifiedChannels.has(channel),
     };
   }
 
@@ -334,12 +363,44 @@ export class TextureSetRuntime {
     this.previewCanvas = null;
     this.adjustedCanvas = null;
     this.previewMaskCanvas = null;
-    this.baseColorModified = false;
   }
 
-  private disposeBakedBaseColor(): void {
-    this.bakedTexture?.dispose();
-    this.bakedTexture = null;
-    this.bakedCanvas = null;
+  private disposeBakedChannel(channel: MaterialChannel): void {
+    this.bakedTextures.get(channel)?.dispose();
+    this.bakedTextures.delete(channel);
+    this.bakedCanvases.delete(channel);
+    this.modifiedChannels.delete(channel);
+  }
+
+  private assignMaterialTexture(channel: MaterialChannel, texture: THREE.Texture): void {
+    switch (channel) {
+      case "baseColor": this.material.map = texture; break;
+      case "roughness": this.material.roughnessMap = texture; break;
+      case "metallic": this.material.metalnessMap = texture; break;
+      case "normal": this.material.normalMap = texture; break;
+    }
+  }
+
+  private async textureToBlob(source: ChannelAsset): Promise<Blob | null> {
+    const canvas = document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    this.getContext(canvas, true).drawImage(
+      this.textureImage(source.texture),
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+    return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+
+  private channelLabel(channel: MaterialChannel): string {
+    return {
+      baseColor: "BaseColor",
+      roughness: "Roughness",
+      metallic: "Metallic",
+      normal: "Normal",
+    }[channel];
   }
 }

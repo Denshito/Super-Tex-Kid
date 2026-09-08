@@ -1,24 +1,36 @@
 import * as THREE from "three";
-import type { DecalImageInput, DecalImageOrigin } from "../../types/editor";
+import type {
+  DecalChannelSummary,
+  DecalImageInput,
+  DecalImageOrigin,
+  MaterialChannel,
+} from "../../types/editor";
 import { ProjectionCaptureActor } from "../capture/ProjectionCaptureActor";
 
-/** One transformable projector and its provider-neutral RGBA source. */
+const CHANNELS: MaterialChannel[] = ["baseColor", "roughness", "metallic", "normal"];
+
+interface DecalChannelResource {
+  canvas: HTMLCanvasElement;
+  texture: THREE.CanvasTexture;
+  label: string;
+  origin: DecalImageOrigin;
+  previewDataUrl: string;
+  enabled: boolean;
+}
+
+/** One transformable projector with provider-neutral PBR channel sources. */
 export class DecalActor extends ProjectionCaptureActor {
   readonly targetMaterialId: string;
 
-  private sourceCanvas: HTMLCanvasElement;
   private readonly maskCanvas: HTMLCanvasElement;
-  private sourceTexture: THREE.CanvasTexture;
   private readonly maskTexture: THREE.CanvasTexture;
-  private sourceLabel = "Captured BaseColor";
-  private sourceOrigin: DecalImageOrigin = "capture";
+  private readonly channels = new Map<MaterialChannel, DecalChannelResource>();
   private useCaptureMask = true;
-  private previewDataUrl: string;
 
   constructor(
     captureActor: ProjectionCaptureActor,
     targetMaterialId: string,
-    capturedBaseColor: HTMLCanvasElement,
+    capturedChannels: Record<MaterialChannel, HTMLCanvasElement>,
     capturedMask: HTMLCanvasElement,
   ) {
     super({
@@ -47,19 +59,66 @@ export class DecalActor extends ProjectionCaptureActor {
     this.root.position.copy(captureActor.root.position);
     this.root.quaternion.copy(captureActor.root.quaternion);
     this.targetMaterialId = targetMaterialId;
-    this.sourceCanvas = this.cloneCanvas(capturedBaseColor);
     this.maskCanvas = this.cloneCanvas(capturedMask);
-    this.previewDataUrl = this.sourceCanvas.toDataURL("image/png");
-    this.sourceTexture = this.createTexture(this.sourceCanvas, true, "DecalSource");
     this.maskTexture = this.createTexture(this.maskCanvas, false, "DecalCaptureMask");
+    for (const channel of CHANNELS) {
+      const canvas = this.cloneCanvas(capturedChannels[channel]);
+      this.channels.set(channel, {
+        canvas,
+        texture: this.createTexture(
+          canvas,
+          channel === "baseColor",
+          `DecalSource:${channel}`,
+        ),
+        label: `Captured ${this.channelLabel(channel)}`,
+        origin: "capture",
+        previewDataUrl: canvas.toDataURL("image/png"),
+        enabled: true,
+      });
+    }
     this.root.updateMatrixWorld(true);
   }
 
-  getSourceTexture(): THREE.Texture { return this.sourceTexture; }
+  getChannelTexture(channel: MaterialChannel): THREE.Texture {
+    const resource = this.channels.get(channel);
+    if (!resource) throw new Error(`Missing Decal ${channel} source`);
+    return resource.texture;
+  }
+
+  getChannelCanvas(channel: MaterialChannel): HTMLCanvasElement {
+    const resource = this.channels.get(channel);
+    if (!resource) throw new Error(`Missing Decal ${channel} source`);
+    return resource.canvas;
+  }
+
+  isChannelEnabled(channel: MaterialChannel): boolean {
+    return this.channels.get(channel)?.enabled ?? false;
+  }
+
+  setChannelEnabled(channel: MaterialChannel, enabled: boolean): void {
+    const resource = this.channels.get(channel);
+    if (resource) resource.enabled = enabled;
+  }
+
+  getEnabledChannels(): MaterialChannel[] {
+    return CHANNELS.filter((channel) => this.isChannelEnabled(channel));
+  }
+
+  getChannelSummaries(): Record<MaterialChannel, DecalChannelSummary> {
+    return Object.fromEntries(CHANNELS.map((channel) => {
+      const resource = this.channels.get(channel);
+      if (!resource) throw new Error(`Missing Decal ${channel} source`);
+      return [channel, {
+        channel,
+        sourceLabel: resource.label,
+        sourceOrigin: resource.origin,
+        previewDataUrl: resource.previewDataUrl,
+        enabled: resource.enabled,
+      }];
+    })) as Record<MaterialChannel, DecalChannelSummary>;
+  }
+
   getMaskTexture(): THREE.Texture { return this.maskTexture; }
-  getSourceCanvas(): HTMLCanvasElement { return this.sourceCanvas; }
-  getSourceLabel(): string { return this.sourceLabel; }
-  getSourceOrigin(): DecalImageOrigin { return this.sourceOrigin; }
   getUseCaptureMask(): boolean { return this.useCaptureMask; }
 
   setUseCaptureMask(enabled: boolean): void {
@@ -75,23 +134,35 @@ export class DecalActor extends ProjectionCaptureActor {
     if (!context) throw new Error("2D Canvas is unavailable for the Decal image");
     context.drawImage(image, 0, 0);
 
-    const texture = this.createTexture(canvas, true, `DecalSource:${input.label}`);
-    this.sourceTexture.dispose();
-    this.sourceCanvas = canvas;
-    this.sourceTexture = texture;
-    this.sourceLabel = input.label;
-    this.sourceOrigin = input.origin;
-    this.previewDataUrl = canvas.toDataURL("image/png");
-  }
-
-  toPreviewDataUrl(): string {
-    return this.previewDataUrl;
+    const resource = this.channels.get(input.channel);
+    if (!resource) throw new Error(`Unknown Decal channel: ${input.channel}`);
+    const texture = this.createTexture(
+      canvas,
+      input.channel === "baseColor",
+      `DecalSource:${input.channel}:${input.label}`,
+    );
+    resource.texture.dispose();
+    resource.canvas = canvas;
+    resource.texture = texture;
+    resource.label = input.label;
+    resource.origin = input.origin;
+    resource.previewDataUrl = canvas.toDataURL("image/png");
   }
 
   override dispose(): void {
-    this.sourceTexture.dispose();
+    for (const resource of this.channels.values()) resource.texture.dispose();
+    this.channels.clear();
     this.maskTexture.dispose();
     super.dispose();
+  }
+
+  private channelLabel(channel: MaterialChannel): string {
+    return {
+      baseColor: "Base Color",
+      roughness: "Roughness",
+      metallic: "Metallic",
+      normal: "Normal",
+    }[channel];
   }
 
   private createTexture(

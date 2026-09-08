@@ -32,8 +32,8 @@ interface EditorState {
   lightingSettings: LightingSettings;
   colorAdjustment: ColorAdjustmentSettings;
   clearMaskToken: number;
-  resetBaseColorToken: number;
-  exportBaseColorToken: number;
+  channelResetRequest: { materialId: string | null; channel: MaterialChannel; token: number } | null;
+  channelExportRequest: { materialId: string | null; channel: MaterialChannel; token: number } | null;
   captureSummary: ProjectionCaptureSummary | null;
   captureActorVisible: boolean;
   captureTransformMode: CaptureTransformMode;
@@ -41,11 +41,13 @@ interface EditorState {
   captureUpdate: ProjectionCaptureSettings | null;
   captureUpdateToken: number;
   decalSummary: DecalActorSummary | null;
+  activeDecalChannel: MaterialChannel;
   decalActorVisible: boolean;
   decalPreviewVisible: boolean;
   createDecalToken: number;
   decalMaskEnabled: boolean;
   decalMaskUpdateToken: number;
+  decalChannelUpdate: { channel: MaterialChannel; enabled: boolean; token: number } | null;
   bakeDecalToken: number;
 
   setModelName: (modelName: string) => void;
@@ -60,18 +62,20 @@ interface EditorState {
   patchLightingSettings: (settings: Partial<LightingSettings>) => void;
   patchColorAdjustment: (settings: Partial<ColorAdjustmentSettings>) => void;
   requestClearMask: () => void;
-  requestResetBaseColor: () => void;
-  requestExportBaseColor: () => void;
+  requestResetChannel: (materialId: string | null, channel: MaterialChannel) => void;
+  requestExportChannel: (materialId: string | null, channel: MaterialChannel) => void;
   setCaptureSummary: (summary: ProjectionCaptureSummary | null) => void;
   setCaptureActorVisible: (visible: boolean) => void;
   setCaptureTransformMode: (mode: CaptureTransformMode) => void;
   requestCreateCapture: () => void;
   requestCaptureUpdate: (settings: ProjectionCaptureSettings) => void;
   setDecalSummary: (summary: DecalActorSummary | null) => void;
+  setActiveDecalChannel: (channel: MaterialChannel) => void;
   setDecalActorVisible: (visible: boolean) => void;
   setDecalPreviewVisible: (visible: boolean) => void;
   requestCreateDecal: () => void;
   setDecalMaskEnabled: (enabled: boolean) => void;
+  setDecalChannelEnabled: (channel: MaterialChannel, enabled: boolean) => void;
   requestBakeDecal: () => void;
   resetForModel: () => void;
 }
@@ -114,8 +118,8 @@ export const useEditorStore = create<EditorState>((set) => ({
     strength: 1,
   },
   clearMaskToken: 0,
-  resetBaseColorToken: 0,
-  exportBaseColorToken: 0,
+  channelResetRequest: null,
+  channelExportRequest: null,
   captureSummary: null,
   captureActorVisible: true,
   captureTransformMode: "translate",
@@ -123,11 +127,13 @@ export const useEditorStore = create<EditorState>((set) => ({
   captureUpdate: null,
   captureUpdateToken: 0,
   decalSummary: null,
+  activeDecalChannel: "baseColor",
   decalActorVisible: true,
   decalPreviewVisible: true,
   createDecalToken: 0,
   decalMaskEnabled: true,
   decalMaskUpdateToken: 0,
+  decalChannelUpdate: null,
   bakeDecalToken: 0,
 
   setModelName: (modelName) => set({ modelName }),
@@ -154,18 +160,28 @@ export const useEditorStore = create<EditorState>((set) => ({
     colorAdjustment: { ...state.colorAdjustment, ...settings },
   })),
   requestClearMask: () => set((state) => ({ clearMaskToken: state.clearMaskToken + 1 })),
-  requestResetBaseColor: () => set((state) => ({
-    resetBaseColorToken: state.resetBaseColorToken + 1,
-    colorAdjustment: {
-      hueDegrees: 0,
-      saturation: 1,
-      brightness: 1,
-      contrast: 1,
-      strength: 1,
+  requestResetChannel: (materialId, channel) => set((state) => ({
+    channelResetRequest: {
+      materialId,
+      channel,
+      token: (state.channelResetRequest?.token ?? 0) + 1,
     },
+    ...(channel === "baseColor" ? {
+      colorAdjustment: {
+        hueDegrees: 0,
+        saturation: 1,
+        brightness: 1,
+        contrast: 1,
+        strength: 1,
+      },
+    } : {}),
   })),
-  requestExportBaseColor: () => set((state) => ({
-    exportBaseColorToken: state.exportBaseColorToken + 1,
+  requestExportChannel: (materialId, channel) => set((state) => ({
+    channelExportRequest: {
+      materialId,
+      channel,
+      token: (state.channelExportRequest?.token ?? 0) + 1,
+    },
   })),
   setCaptureSummary: (captureSummary) => set({ captureSummary }),
   setCaptureActorVisible: (captureActorVisible) => set({ captureActorVisible }),
@@ -181,6 +197,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     decalSummary,
     decalMaskEnabled: decalSummary?.useCaptureMask ?? state.decalMaskEnabled,
   })),
+  setActiveDecalChannel: (activeDecalChannel) => set({ activeDecalChannel }),
   setDecalActorVisible: (decalActorVisible) => set({ decalActorVisible }),
   setDecalPreviewVisible: (decalPreviewVisible) => set({ decalPreviewVisible }),
   requestCreateDecal: () => set((state) => ({
@@ -189,6 +206,20 @@ export const useEditorStore = create<EditorState>((set) => ({
   setDecalMaskEnabled: (decalMaskEnabled) => set((state) => ({
     decalMaskEnabled,
     decalMaskUpdateToken: state.decalMaskUpdateToken + 1,
+  })),
+  setDecalChannelEnabled: (channel, enabled) => set((state) => ({
+    decalSummary: state.decalSummary ? {
+      ...state.decalSummary,
+      channels: {
+        ...state.decalSummary.channels,
+        [channel]: { ...state.decalSummary.channels[channel], enabled },
+      },
+    } : null,
+    decalChannelUpdate: {
+      channel,
+      enabled,
+      token: (state.decalChannelUpdate?.token ?? 0) + 1,
+    },
   })),
   requestBakeDecal: () => set((state) => ({
     bakeDecalToken: state.bakeDecalToken + 1,
@@ -204,9 +235,11 @@ export const useEditorStore = create<EditorState>((set) => ({
     captureTransformMode: "translate",
     captureUpdate: null,
     decalSummary: null,
+    activeDecalChannel: "baseColor",
     decalActorVisible: true,
     decalPreviewVisible: true,
     decalMaskEnabled: true,
+    decalChannelUpdate: null,
     colorAdjustment: {
       hueDegrees: 0,
       saturation: 1,

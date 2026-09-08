@@ -4,7 +4,7 @@ An AI-assisted 3D texture editing desktop client for technical-art workflows.
 
 Super Tex Kid is being developed as a portfolio project that explores model-aware texture editing: selecting pixels by painting directly on a 3D surface, isolating material texture sets, previewing PBR channels in real time, and eventually applying local or AI-assisted edits non-destructively.
 
-> Current status: functional prototype. The viewport, material-aware brush, BVH picking, PBR import, multi-pass projection capture, transformable PBR Decal preview, and non-destructive Base Color bake/export are implemented. The editor now includes a compact DCC-style inspector and Maya-style Actor transform shortcuts. Project persistence, undo/redo, multi-Decal layers, and AI execution are not connected yet.
+> Current status: functional prototype. The viewport, material-aware brush, BVH picking, PBR import, multi-pass projection capture, transformable four-channel PBR Decal preview, and non-destructive Base Color/Roughness/Metallic/Normal bake are implemented. OpenRouter-powered GPT Image 2 BaseColor editing is now available as a session-only first integration. Project persistence, undo/redo, multi-Decal layers, and AI editing of non-color channels are not connected yet.
 
 ## Target experience
 
@@ -25,7 +25,7 @@ The long-term goal is not to replace a full material-authoring suite. It is to p
 ### Desktop application and editor shell
 
 - Tauri 2 desktop application with a React and TypeScript frontend.
-- Resizable Three.js viewport and six independently collapsible workflow panels.
+- Resizable Three.js viewport and a mode-driven contextual workbench with dedicated AI editing space.
 - Compact English DCC-style interface with a charcoal palette and restrained dark-blue accents.
 - Drag-and-drop and file-picker import for standalone `.glb` files.
 - Zustand-based editor state shared between the viewport and property panels.
@@ -68,12 +68,26 @@ The long-term goal is not to replace a full material-authoring suite. It is to p
 
 - Orthographic Capture Actor seeded from the painted selection bounds and average surface normal.
 - Separate unlit Base Color, Roughness, material Normal, Metallic, selection-mask, view-space geometry Normal, and linear-depth previews.
-- One transformable Decal Actor initialized from the latest Capture, with file-imported RGBA replacement and an optional Capture Mask constraint.
+- One transformable Decal Actor initialized from all four Capture channels, with independent file replacement, enable state, preview, reset, and export per channel.
 - Maya-style `W`, `E`, and `R` shortcuts for Actor translation, rotation, and scale, plus independent Capture Actor, Decal Actor, and Decal Preview visibility.
-- Projective Base Color preview injected into the target `MeshStandardMaterial`, preserving PBR lighting, normal, roughness, metallic, IBL, and tone mapping.
+- Projective Base Color, Roughness, Metallic, and projector-aware RNM Normal preview injected into the target `MeshStandardMaterial`, preserving its PBR lighting, IBL, and tone mapping.
 - Preview and bake remain isolated to the captured material slot, with depth occlusion and a fixed grazing-angle fade.
-- GPU UV-space Base Color bake at the imported source resolution, followed by one readback into a resettable Working Texture.
-- Provider-neutral Blob input shared by local files and a future generated-image result; no image API is connected yet.
+- Transactional GPU UV-space PBR bake at each imported channel's source resolution, followed by one readback and one resettable Working Texture per enabled channel.
+- Roughness writes G, Metallic writes B, and Normal uses the same projector-to-tangent RNM composition in preview and bake.
+- Provider-neutral, channel-addressed Blob input shared by local files and generated-image results.
+
+### OpenRouter AI BaseColor editing
+
+The AI Edit workbench now includes **Assistant** and **Image Edit** pages. In AI Settings, connect a separate DeepSeek official key under **Prompt Assistant**. Discuss the current BaseColor and Mask (plus optional reference/geometry guides), review the editable English prompt, and choose **Apply to Image Edit**. Only **Generate** sends a paid image-generation request to OpenRouter; Bake remains manual. DeepSeek chat itself is billed by its provider.
+
+The assistant uses `deepseek-v4-flash-vision-exp` with the bundled `skills/stk-decal-prompt/SKILL.md`. Keys and transcripts are session-only. It retains 20 successful chat rounds and sends the latest 10 plus current images, resized to at most 1024px for chat only. Stale replies are labeled and do not auto-apply to a changed Decal. The connection check validates the account, not vision model availability; first chat verifies vision access. No live API validation is bundled with the automated test suite.
+
+- Session-only OpenRouter key validation and storage in Rust process memory; keys are never persisted by STK.
+- GPT Image 2 receives the current BaseColor and Capture Mask, plus one optional material reference and optional ViewNormal/Depth guides.
+- English engineering constraints request flat albedo without lighting, reflections, highlights, shadows, or guide colors.
+- Up to eight generated revisions plus the original Capture remain selectable during the active Decal session.
+- A successful result automatically replaces only the live BaseColor Decal source and reopens Preview; Bake remains an explicit artist action.
+- Input format, size, prompt length, timeout, response size, and common OpenRouter billing/rate/server errors are validated in the Rust boundary.
 
 ## Development strategy
 
@@ -86,7 +100,7 @@ The current architecture separates responsibilities as follows:
 - **Three.js** owns rendering, PBR materials, model loading, UV picking, and viewport interaction.
 - **SelectionMask** stores an authoritative texture-resolution mask plus a smaller real-time preview.
 - **SelectionOverlay** injects selection visualization into the standard PBR shader without modifying source textures.
-- **Tauri/Rust** provides the desktop runtime and is reserved for project I/O, native integration, and future processing/job orchestration.
+- **Tauri/Rust** provides the desktop runtime and owns the session-only OpenRouter credential and trusted image request boundary.
 
 This division keeps the current prototype simple while leaving clear replacement points for GPU mask projection, render-target image processing, persistent projects, and AI backends.
 
@@ -94,7 +108,7 @@ See [docs/architecture.md](docs/architecture.md) for the current directory and r
 
 ## Roadmap
 
-### Next milestone: Decal validation and editing workflow
+### Next milestone: AI Decal validation and editing workflow
 
 - Validate projection orientation, depth occlusion, multi-material isolation, and UV-island bake behavior on representative GLB assets.
 - Add bake-loss diagnostics for grazing angles, overlapping UVs, and insufficient texel density.
@@ -103,6 +117,7 @@ See [docs/architecture.md](docs/architecture.md) for the current directory and r
 - Add explicit feather controls and before/after comparison.
 - Add undo/redo for strokes and effect parameters.
 - Save and reload project manifests with portable asset references.
+- Validate Prompt behavior and cost/latency with representative material references before adding provider abstraction.
 
 ### Later milestones
 
@@ -122,9 +137,9 @@ See [docs/architecture.md](docs/architecture.md) for the current directory and r
 - Studio IBL is built in; importing or rotating a custom HDRI is not supported yet.
 - Existing masks are not automatically resampled when a different-resolution texture is imported after painting.
 - High-resolution source masks are committed at stroke end; exceptionally long strokes may still cause a short pointer-up pause.
-- The AI processing layer is not connected yet.
-- Decal bake currently targets Base Color only, supports one active static-mesh Decal, and requires an existing Base Color map with UV0.
-- Skinned meshes, position morphs, UDIMs, overlapping-UV diagnostics, and PBR Decal channel blending are outside the current bake path.
+- AI editing currently affects BaseColor only, requires an online OpenRouter account, and keeps no history after the process closes.
+- Decal bake supports one active static-mesh Decal with UV0; every enabled channel requires an existing target map with a known resolution.
+- Skinned meshes, position morphs, UDIMs, overlapping-UV diagnostics, DirectX normal conversion, and multi-Decal layering are outside the current bake path.
 
 ## Technology stack
 

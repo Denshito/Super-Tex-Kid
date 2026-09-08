@@ -12,7 +12,10 @@ export interface TextureImportRequest {
 
 export interface DecalImportRequest {
   id: number;
-  file: File;
+  channel: MaterialChannel;
+  blob: Blob;
+  label: string;
+  origin: "capture" | "file" | "generated";
 }
 
 interface Viewport3DProps {
@@ -54,8 +57,8 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
   const colorAdjustment = useEditorStore((state) => state.colorAdjustment);
   const activeMaterialId = useEditorStore((state) => state.activeSurface?.materialId ?? null);
   const clearMaskToken = useEditorStore((state) => state.clearMaskToken);
-  const resetBaseColorToken = useEditorStore((state) => state.resetBaseColorToken);
-  const exportBaseColorToken = useEditorStore((state) => state.exportBaseColorToken);
+  const channelResetRequest = useEditorStore((state) => state.channelResetRequest);
+  const channelExportRequest = useEditorStore((state) => state.channelExportRequest);
   const captureTransformMode = useEditorStore((state) => state.captureTransformMode);
   const captureActorVisible = useEditorStore((state) => state.captureActorVisible);
   const createCaptureToken = useEditorStore((state) => state.createCaptureToken);
@@ -66,6 +69,7 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
   const decalActorVisible = useEditorStore((state) => state.decalActorVisible);
   const decalPreviewVisible = useEditorStore((state) => state.decalPreviewVisible);
   const decalMaskUpdateToken = useEditorStore((state) => state.decalMaskUpdateToken);
+  const decalChannelUpdate = useEditorStore((state) => state.decalChannelUpdate);
   const bakeDecalToken = useEditorStore((state) => state.bakeDecalToken);
 
   useEffect(() => {
@@ -81,17 +85,22 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
       onDecalChanged: setDecalSummary,
       onDecalBaked: (result) => {
         setDecalPreviewVisible(false);
+        const channelSummary = Object.entries(result.channels)
+          .map(([channel, output]) => `${channel} ${output?.width}×${output?.height}`)
+          .join(", ");
         setViewportStatus({
           kind: "ready",
-          message: `Decal baked to ${result.width} × ${result.height} Base Color`,
+          message: `Decal baked: ${channelSummary}`,
         });
-        patchColorAdjustment({
-          hueDegrees: 0,
-          saturation: 1,
-          brightness: 1,
-          contrast: 1,
-          strength: 1,
-        });
+        if (result.channels.baseColor) {
+          patchColorAdjustment({
+            hueDegrees: 0,
+            saturation: 1,
+            brightness: 1,
+            contrast: 1,
+            strength: 1,
+          });
+        }
       },
       onCaptureError: (message) => setViewportStatus({
         kind: "error",
@@ -158,6 +167,14 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
   }, [decalMaskEnabled, decalMaskUpdateToken]);
 
   useEffect(() => {
+    if (!decalChannelUpdate) return;
+    viewportRef.current?.setDecalChannelEnabled(
+      decalChannelUpdate.channel,
+      decalChannelUpdate.enabled,
+    );
+  }, [decalChannelUpdate]);
+
+  useEffect(() => {
     if (bakeDecalToken <= 0 || !viewportRef.current) return;
     try {
       viewportRef.current.bakeDecal();
@@ -184,22 +201,28 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
   }, [activeMaterialId, colorAdjustment]);
 
   useEffect(() => {
-    if (resetBaseColorToken > 0) {
-      viewportRef.current?.resetBaseColorAdjustment(activeMaterialId);
-    }
-  }, [resetBaseColorToken]);
+    if (!channelResetRequest) return;
+    viewportRef.current?.resetChannel(
+      channelResetRequest.materialId,
+      channelResetRequest.channel,
+    );
+  }, [channelResetRequest]);
 
   useEffect(() => {
-    if (exportBaseColorToken <= 0 || !viewportRef.current) return;
-    viewportRef.current.exportBaseColor(activeMaterialId, colorAdjustment)
+    if (!channelExportRequest || !viewportRef.current) return;
+    viewportRef.current.exportChannel(
+      channelExportRequest.materialId,
+      channelExportRequest.channel,
+      colorAdjustment,
+    )
       .then((exported) => setViewportStatus(exported
         ? { kind: "ready", message: "Browser download started — check your default Downloads folder" }
-        : { kind: "error", message: "Export requires a Base Color texture and selection mask" }))
+        : { kind: "error", message: `Export requires a loaded ${channelExportRequest.channel} texture` }))
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        setViewportStatus({ kind: "error", message: `Base Color export failed: ${message}` });
+        setViewportStatus({ kind: "error", message: `${channelExportRequest.channel} export failed: ${message}` });
       });
-  }, [exportBaseColorToken, setViewportStatus]);
+  }, [channelExportRequest, colorAdjustment, setViewportStatus]);
 
   useEffect(() => {
     if (!textureImport || !viewportRef.current) return;
@@ -227,20 +250,27 @@ export function Viewport3D({ modelFile, textureImport, decalImport }: Viewport3D
   useEffect(() => {
     if (!decalImport || !viewportRef.current) return;
     let cancelled = false;
-    setViewportStatus({ kind: "loading", message: `Loading Decal ${decalImport.file.name}` });
+    setViewportStatus({ kind: "loading", message: `Loading Decal ${decalImport.label}` });
     viewportRef.current.setDecalImage({
-      blob: decalImport.file,
-      label: decalImport.file.name,
-      origin: "file",
+      channel: decalImport.channel,
+      blob: decalImport.blob,
+      label: decalImport.label,
+      origin: decalImport.origin,
     }).then(() => {
-      if (!cancelled) setViewportStatus({ kind: "ready", message: "Decal image applied" });
+      if (!cancelled) {
+        setDecalPreviewVisible(true);
+        setViewportStatus({
+          kind: "ready",
+          message: `${decalImport.channel} Decal image applied with live preview`,
+        });
+      }
     }).catch((error: unknown) => {
       if (cancelled) return;
       const message = error instanceof Error ? error.message : String(error);
       setViewportStatus({ kind: "error", message: `Decal import failed: ${message}` });
     });
     return () => { cancelled = true; };
-  }, [decalImport, setViewportStatus]);
+  }, [decalImport, setDecalPreviewVisible, setViewportStatus]);
 
   useEffect(() => {
     if (clearMaskToken > 0) viewportRef.current?.clearActiveMask();

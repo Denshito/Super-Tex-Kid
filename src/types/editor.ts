@@ -125,9 +125,18 @@ export type DecalImageOrigin = "capture" | "file" | "generated";
 
 /** Provider-neutral image payload accepted by the Decal runtime. */
 export interface DecalImageInput {
+  channel: MaterialChannel;
   blob: Blob;
   label: string;
   origin: DecalImageOrigin;
+}
+
+export interface DecalChannelSummary {
+  channel: MaterialChannel;
+  sourceLabel: string;
+  sourceOrigin: DecalImageOrigin;
+  previewDataUrl: string;
+  enabled: boolean;
 }
 
 export interface DecalActorSettings {
@@ -136,19 +145,23 @@ export interface DecalActorSettings {
 
 /** UI-safe snapshot; mutable Three.js resources remain inside ThreeViewport. */
 export interface DecalActorSummary extends DecalActorSettings {
+  sessionId: number;
   textureSetId: string;
-  sourceLabel: string;
-  sourceOrigin: DecalImageOrigin;
+  targetTextureSet: TextureSetSummary;
   width: number;
   height: number;
   near: number;
   far: number;
-  previewDataUrl: string;
+  channels: Record<MaterialChannel, DecalChannelSummary>;
+}
+
+export interface DecalChannelBakeResult {
+  width: number;
+  height: number;
+  processedPixels: number;
 }
 
 export interface DecalBakeResult {
   textureSetId: string;
-  width: number;
-  height: number;
-  processedPixels: number;
+  channels: Partial<Record<MaterialChannel, DecalChannelBakeResult>>;
 }
